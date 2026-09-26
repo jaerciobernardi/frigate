@@ -1,0 +1,392 @@
+# ─────────────────────────────────────────────
+# Frigate config.yml
+# Place this file at ./config/config.yml
+# relative to your docker-compose file.
+# ─────────────────────────────────────────────
+# VERSÃO iGPU — adaptada para rodar em um LXC no Proxmox usando a
+# iGPU do i5-8400 (Intel UHD 630) em vez da GTX 1080/TensorRT.
+#   - Detecção: detector OpenVINO na GPU (usa a iGPU para inferência)
+#   - Decode de vídeo: VAAPI (usa a iGPU para decodificação)
+# Sem crop — usa zonas em vez de recorte físico do vídeo.
+# ─────────────────────────────────────────────
+
+mqtt:
+  enabled: false          # Set to true and fill in host/port if you use Home Assistant / MQTT
+
+detectors:
+  ov:
+    type: openvino
+    device: GPU
+
+# model:
+#   width: 300
+#   height: 300
+#   input_tensor: nhwc
+#   input_pixel_format: bgr
+#   path: /openvino-model/ssdlite_mobilenet_v2.xml
+#   labelmap_path: /openvino-model/coco_91cl_bkgr.txt            # usa a iGPU (UHD 630) via OpenVINO para inferência
+
+# model:
+#   path: /config/model_cache/yolov9-t320.xml
+#   input_tensor: nchw
+#   input_pixel_format: rgb
+#   input_dtype: float
+#   width: 320
+#   height: 320
+#   model_type: yolo-generic
+#   labelmap_path: /labelmap/coco-80.txt
+
+# model:
+#   path: /config/model_cache/yolov9-t-640.xml
+#   input_tensor: nchw
+#   input_pixel_format: rgb
+#   input_dtype: float
+#   width: 640
+#   height: 640
+#   model_type: yolo-generic
+#   labelmap_path: /labelmap/coco-80.txt
+
+# model:
+#   path: /config/model_cache/yolov9-s.xml
+#   input_tensor: nchw
+#   input_pixel_format: rgb
+#   input_dtype: float
+#   width: 320
+#   height: 320
+#   model_type: yolo-generic
+#   labelmap_path: /labelmap/coco-80.txt
+
+model:
+  path: /config/model_cache/yolov9-m-320.xml
+  input_tensor: nchw
+  input_pixel_format: rgb
+  input_dtype: float
+  width: 320
+  height: 320
+  model_type: yolo-generic
+  labelmap_path: /labelmap/coco-80.txt
+
+# --- go2rtc settings (embutido no próprio container do Frigate)
+# SEM crop — só restream direto do stream original (leve, sem decode/encode extra)
+go2rtc:
+  streams:
+    fundos_full:
+      - rtsp://admin:{FRIGATE_FUNDOS_PASSWORD}@192.168.18.189:554/onvif1
+    # fundos_record:
+    #   - rtsp://admin:{FRIGATE_FUNDOS_PASSWORD}@192.168.18.189:554/onvif2
+    #   - ffmpeg:rtsp://localhost:8554/fundos_full#audio=copy
+    # fundos_detect:
+    #   - rtsp://admin:{FRIGATE_FUNDOS_PASSWORD}@192.168.18.189:554/onvif2
+    frente_full:
+      - rtsp://admin:{FRIGATE_FRENTE_PASSWORD}@192.168.18.80:554/onvif1
+    # frente_detect:
+    #   - rtsp://admin:{FRIGATE_FRENTE_PASSWORD}@192.168.18.80:554/onvif2
+
+# ── Câmera única (imagem original 1920x2160: topo = garagem, base = quintal) ──
+cameras:
+  Fundos:
+    enabled: true
+    ffmpeg:
+      global_args: -avoid_negative_ts make_zero -fflags +genpts+discardcorrupt 
+        -use_wallclock_as_timestamps 1
+      hwaccel_args: preset-vaapi   # decodificação via iGPU (Intel UHD 630)
+      inputs:
+        - path: rtsp://localhost:8554/fundos_full
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+            - detect
+        # - path: rtsp://localhost:8554/fundos_detect
+        #   input_args: preset-rtsp-restream
+        #   roles:
+        #     - detect
+      output_args:
+        record: preset-record-generic-audio-aac   # grava com áudio de forma mais estável (evita segmentos corrompidos)
+
+    # ── ONVIF / PTZ ──────────────────────────
+    # Testado e confirmado: câmera responde ONVIF na porta 5000
+    onvif:
+      host: 192.168.18.189
+      port: 5000
+      user: admin
+      password: "{FRIGATE_FUNDOS_PASSWORD}"
+      # tls_insecure: False   # descomente se usar https no host acima
+      autotracking:
+        enabled: false
+        track:
+          - person
+        return_preset: home
+        timeout: 10
+        zooming: absolute
+        zoom_factor: 0.3
+
+    detect:
+      enabled: true
+      width: 640           # high 960x1080 - mid 640x720 - low 480x540 -stream2 864x976
+      height: 720
+      fps: 5
+
+    record:
+      enabled: true
+      continuous:
+        days: 0
+      motion:
+        days: 7
+
+    snapshots:
+      enabled: true
+      retain:
+        default: 14
+
+    # ── Zonas — separação lógica, sem custo de CPU extra ──────────
+    # Coordenadas normalizadas (0.0 a 1.0), pois a imagem é 1920x2160:
+    # topo = garagem (0.0 a 0.5 da altura) | base = quintal (0.5 a 1.0 da altura)
+    zones:
+      quintal:
+        coordinates: 0,0,1,0,1,0.501,0,0.501
+        inertia: 3
+        loitering_time: 0
+        objects:
+          - person
+          - cat
+      rua:
+        coordinates: 0,0.501,1,0.501,1,0.551,0.142,0.582,0,0.595
+        loitering_time: 0
+        inertia: 3
+      garagem:
+        coordinates: 0,0.595,0.142,0.582,1,0.551,1,1,0,1
+        inertia: 3
+        loitering_time: 0
+        objects:
+          - person
+          - cat
+          - car
+    motion:
+      threshold: 30
+      contour_area: 10
+      improve_contrast: true
+      mask:
+        motion_mask_1:
+          friendly_name: Motion Mask 1
+          enabled: true
+          coordinates: 0.003,0.501,0.318,0.502,0.319,0.531,0,0.531
+        motion_mask_2:
+          friendly_name: Motion Mask 2
+          enabled: true
+          coordinates: 0,0.028,0.324,0.028,0.323,0,0,0
+    objects:
+      filters:
+        car:
+          mask:
+            object_mask_1:
+              friendly_name: Object Mask 1 (car)
+              enabled: true
+              coordinates: 
+                0.132,0.67,0.108,0.675,0.366,1,1,1,1,0.804,0.858,0.665,0.495,0.564,1,0.544,1,0.501,0,0.501,0,0.588,0.143,0.576
+        person:
+          mask:
+            object_mask_1:
+              friendly_name: Object Mask 1 (person)
+              enabled: true
+              coordinates: 
+                0.001,0.777,0.571,0.722,1,0.654,1,0.712,0.571,0.798,0,0.865
+            object_mask_2:
+              friendly_name: Object Mask 2 (person)
+              enabled: true
+              coordinates: 
+                0.001,0.908,0.613,0.821,1,0.724,1,0.799,0.618,0.899,0.082,0.964,0.001,0.963
+    review:
+      alerts:
+        required_zones:
+          - garagem
+          - quintal
+        labels:
+          - person
+          - cat
+          - car
+          - motorcycle
+          - bicycle
+      detections:
+        labels:
+          - person
+          - cat
+          - bicycle
+  Frente:
+    enabled: true
+    ffmpeg:
+      global_args: -avoid_negative_ts make_zero -fflags +genpts+discardcorrupt 
+        -use_wallclock_as_timestamps 1
+      hwaccel_args: preset-vaapi   # decodificação via iGPU (Intel UHD 630)
+      inputs:
+        - path: rtsp://localhost:8554/frente_full
+          input_args: preset-rtsp-restream
+          roles:
+            - record
+            - detect
+        # - path: rtsp://localhost:8554/frente_detect
+        #   input_args: preset-rtsp-restream
+        #   roles:
+        #     - detect
+      output_args:
+        record: preset-record-generic-audio-aac   # grava com áudio de forma mais estável (evita segmentos corrompidos)
+
+    # ── ONVIF / PTZ ──────────────────────────
+    # Testado e confirmado: câmera responde ONVIF na porta 5000
+    onvif:
+      host: 192.168.18.80
+      port: 5000
+      user: admin
+      password: "{FRIGATE_FRENTE_PASSWORD}"
+      # tls_insecure: False   # descomente se usar https no host acima
+      autotracking:
+        enabled: false
+        track:
+          - person
+        return_preset: home
+        timeout: 10
+        zooming: absolute
+        zoom_factor: 0.3
+
+    detect:
+      enabled: true
+      width: 640           # high 960x1080 - mid 640x720 - low 480x540 -stream2 864x976
+      height: 720
+      fps: 5
+
+    record:
+      enabled: true
+      continuous:
+        days: 0
+      motion:
+        days: 7
+
+    snapshots:
+      enabled: true
+      retain:
+        default: 14
+
+    # ── Zonas — separação lógica, sem custo de CPU extra ──────────
+    # Coordenadas normalizadas (0.0 a 1.0), pois a imagem é 1920x2160:
+    # topo = garagem (0.0 a 0.5 da altura) | base = quintal (0.5 a 1.0 da altura)
+    zones:
+      frente_d:
+        coordinates: 0,0.201,0.447,0.125,1,0.076,1,0.501,0,0.501
+        inertia: 3
+        loitering_time: 0
+        objects:
+          - person
+          - cat
+          - car
+        enabled: true
+        friendly_name: frente d
+      frente_e:
+        coordinates: 0,0.538,0.11,0.624,0.366,0.6,1,0.78,1,1,0,1
+        inertia: 3
+        loitering_time: 0
+        objects:
+          - person
+          - cat
+        enabled: true
+        friendly_name: frente e
+      rua_e:
+        coordinates: 
+          1,0.502,0.001,0.501,0.001,0.536,0.112,0.622,0.366,0.6,1,0.778
+        enabled: true
+        inertia: 3
+        loitering_time: 0
+        friendly_name: rua e
+      rua_d:
+        coordinates: 0,0,1,0,1,0.074,0.468,0.12,0,0.197
+        enabled: true
+        inertia: 3
+        loitering_time: 0
+        friendly_name: rua d
+    motion:
+      threshold: 30
+      contour_area: 10
+      improve_contrast: true
+      mask:
+        motion_mask_1:
+          friendly_name: Motion Mask 1
+          enabled: true
+          coordinates: 0.003,0.501,0.318,0.502,0.319,0.531,0,0.531
+        motion_mask_2:
+          friendly_name: Motion Mask 2
+          enabled: true
+          coordinates: 0,0.026,0.316,0.026,0.316,0,0,0
+    review:
+      alerts:
+        required_zones:
+          - frente_d
+          - frente_e
+        labels:
+          - person
+          - cat
+          - car
+          - motorcycle
+          - bicycle
+      detections:
+        labels:
+          - person
+          - cat
+          - bicycle
+    objects:
+      filters:
+        car:
+          mask:
+            carro_rua_e: &mask_rua_e
+              friendly_name: Rua E
+              enabled: true
+              coordinates: 0.999,0.738,0.999,0.504,0.004,0.501
+            carro_rua_d: &mask_rua_d
+              friendly_name: Rua D
+              enabled: true
+              coordinates: 0,0.177,0.462,0.102,0.997,0.057,0.999,0,0.003,0.002
+        motorcycle:
+          mask:
+            moto_rua_e: *mask_rua_e
+            moto_rua_d: *mask_rua_d
+objects:
+  track:
+    - person
+    - car
+    - cat
+    - motorcycle
+    - bicycle
+  filters:
+    person:
+      threshold: 0.75
+      min_area: 4000
+    cat:
+      threshold: 0.45
+      min_score: 0.30
+    motorcycle:
+      threshold: 0.55
+      min_score: 0.40
+    bicycle:
+      threshold: 0.50
+      min_score: 0.35
+
+# ── Recording storage (retenção global) ───────
+record:
+  enabled: true
+  continuous:
+    days: 0
+  motion:
+    days: 7
+  preview:
+    quality: very_high
+
+# logger:
+#   default: info
+#   logs:
+#     frigate.record: debug
+#     ffmpeg.Fundos.detect: debug
+#     ffmpeg.Fundos.record: debug
+
+# NOTA: a chave "notifications" (notifications.enabled / notifications.email)
+# foi removida — não existe no schema oficial do Frigate e pode causar erro
+# de validação. Para alertas por e-mail, use Home Assistant + MQTT ou uma
+# automação externa que consuma os eventos do Frigate.
+
+version: 0.18-0

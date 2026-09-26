@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────
+# docker-compose.yml — Frigate usando a iGPU do i5-8400 (UHD 630)
+# Rodando dentro de um container/LXC no Proxmox
+# ─────────────────────────────────────────────
+# Pré-requisito no HOST/LXC (fora do Docker):
+#   - O dispositivo /dev/dri precisa existir e estar acessível.
+#   - Se for um LXC (não VM) no Proxmox, o /dev/dri precisa ser passado
+#     para dentro do container via config do LXC (bind mount /dev/dri),
+#     e o container precisa ter os grupos "video"/"render" liberados.
+#   - Rode `ls -l /dev/dri` no host para conferir os IDs de grupo
+#     (video e render) e ajuste GID abaixo se necessário.
+# ─────────────────────────────────────────────
+
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:0.18.0
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: "256mb"          # aumente se tiver mais câmeras/resolução alta
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128   # iGPU (VAAPI/QSV) para decode e OpenVINO
+      # - /dev/dri/card0:/dev/dri/card0            # descomente se necessário no seu setup
+    group_add:
+      - "video"
+      - "992"                # necessário para o container acessar a iGPU sem privileged
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /root/frigate/config:/config
+      - /root/frigate/storage:/media/frigate
+      - /root/frigate/config/sitecustomize.py:/usr/lib/python3.11/sitecustomize.py:ro
+      - /dev/null:/usr/lib/python3.11/__pycache__/sitecustomize.cpython-311.pyc:ro
+
+      - type: tmpfs             # cache de gravação em RAM (recomendado pela doc do Frigate)
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000      # ~1GB — ajuste conforme RAM disponível
+    ports:
+      - "8971:8971"    # UI/API autenticada (use esta para acesso normal/externo)
+      - "5000:5000"    # UI/API interna sem autenticação — não exponha para fora
+      - "8554:8554"    # RTSP feed do go2rtc (opcional)
+      - "8555:8555/tcp"  # WebRTC
+      - "8555:8555/udp"  # WebRTC
+    environment:
+      - FRIGATE_RTSP_PASSWORD=${FRIGATE_RTSP_PASSWORD}
+      - FRIGATE_FUNDOS_PASSWORD=${FRIGATE_FUNDOS_PASSWORD}
+      - FRIGATE_FRENTE_PASSWORD=${FRIGATE_FRENTE_PASSWORD}
+    network_mode: host

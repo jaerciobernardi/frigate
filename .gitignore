@@ -1,0 +1,15 @@
+.env
+*.log
+.DS_Store
+storage/
+config/model_cache/
+config/frigate.db
+config/frigate.db-shm
+config/frigate.db-wal
+config/backup.db
+config/.exports
+config/.vacuum
+config/.jwt_secret
+config/.search_stats.json
+config/.runtime_state.json.lock
+config/config.yml.lock
